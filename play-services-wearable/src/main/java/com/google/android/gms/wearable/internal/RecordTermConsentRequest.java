@@ -21,25 +21,25 @@ import org.microg.safeparcel.SafeParceled;
 
 public class RecordTermConsentRequest extends AutoSafeParcelable {
     @SafeParceled(1)
-    public final int unk1;
+    public final int termsContext;
     @SafeParceled(2)
-    public final int unk2;
+    public final int termType;
     @SafeParceled(3)
-    public final boolean unk3;
+    public final boolean consentGranted;
     @SafeParceled(4)
-    public final String unk4;
+    public final String parentGaiaId;
     @SafeParceled(5)
-    public final String unk5;
+    public final String childGaiaId;
     @SafeParceled(6)
-    public final String unk6;
+    public final String accountId;
 
-    public RecordTermConsentRequest(int unk1, int unk2, boolean unk3, String unk4, String unk5, String unk6) {
-        this.unk1 = unk1;
-        this.unk2 = unk2;
-        this.unk3 = unk3;
-        this.unk4 = unk4;
-        this.unk5 = unk5;
-        this.unk6 = unk6;
+    public RecordTermConsentRequest(int termsContext, int termType, boolean consentGranted, String parentGaiaId, String childGaiaId, String accountId) {
+        this.termsContext = termsContext;
+        this.termType = termType;
+        this.consentGranted = consentGranted;
+        this.parentGaiaId = parentGaiaId;
+        this.childGaiaId = childGaiaId;
+        this.accountId = accountId;
     }
 
     public static final Creator<RecordTermConsentRequest> CREATOR = new AutoCreator<RecordTermConsentRequest>(RecordTermConsentRequest.class);

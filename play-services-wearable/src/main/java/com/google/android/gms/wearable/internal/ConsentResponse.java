@@ -34,8 +34,8 @@ public class ConsentResponse extends AutoSafeParcelable {
     public boolean hasCloudSyncConsent;
     @SafeParceled(5)
     public boolean hasLocationConsent;
-    @SafeParceled(6)
-    public List accountConsentRecords;
+    @SafeParceled(value = 6, subClass = AccountConsentRecordParcelable.class)
+    public List<AccountConsentRecordParcelable> accountConsentRecords;
     @SafeParceled(7)
     public String nodeId;
     @SafeParceled(8)
@@ -43,7 +43,7 @@ public class ConsentResponse extends AutoSafeParcelable {
 
     private ConsentResponse() {}
 
-    public ConsentResponse(int statusCode, boolean hasTosConsent, boolean hasLoggingConsent, boolean hasCloudSyncConsent, boolean hasLocationConsent, List accountConsentRecords, String nodeId, Long lastUpdateRequestedTime) {
+    public ConsentResponse(int statusCode, boolean hasTosConsent, boolean hasLoggingConsent, boolean hasCloudSyncConsent, boolean hasLocationConsent, List<AccountConsentRecordParcelable> accountConsentRecords, String nodeId, Long lastUpdateRequestedTime) {
         this.statusCode = statusCode;
         this.hasTosConsent = hasTosConsent;
         this.hasLoggingConsent = hasLoggingConsent;

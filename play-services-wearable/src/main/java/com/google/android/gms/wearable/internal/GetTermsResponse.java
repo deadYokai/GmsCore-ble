@@ -16,6 +16,8 @@
 
 package com.google.android.gms.wearable.internal;
 
+import com.google.android.gms.wearable.Term;
+
 import org.microg.safeparcel.AutoSafeParcelable;
 import org.microg.safeparcel.SafeParceled;
 
@@ -24,12 +26,12 @@ import java.util.List;
 public class GetTermsResponse extends AutoSafeParcelable {
     @SafeParceled(1)
     public int statusCode;
-    @SafeParceled(2)
-    public List consents; // correct name is unknown, but assuming this is a consent list
+    @SafeParceled(value = 2, subClass = Term.class)
+    public List<Term> consents; // correct name is unknown, but assuming this is a consent list
 
     private GetTermsResponse() {}
 
-    public GetTermsResponse(int statusCode, List consents) {
+    public GetTermsResponse(int statusCode, List<Term> consents) {
         this.statusCode = statusCode;
         this.consents = consents;
     }

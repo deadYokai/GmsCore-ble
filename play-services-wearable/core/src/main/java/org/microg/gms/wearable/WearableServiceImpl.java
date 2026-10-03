@@ -18,6 +18,7 @@ package org.microg.gms.wearable;
 
 import android.Manifest;
 import android.accounts.Account;
+import android.accounts.AccountManager;
 import android.content.Context;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
@@ -44,6 +45,7 @@ import com.google.android.gms.wearable.Asset;
 import com.google.android.gms.wearable.ConnectionConfiguration;
 import com.google.android.gms.wearable.ConnectionDelayConfig;
 import com.google.android.gms.wearable.MessageOptions;
+import com.google.android.gms.wearable.Term;
 import com.google.android.gms.wearable.WearableStatusCodes;
 import com.google.android.gms.wearable.internal.*;
 
@@ -57,11 +59,18 @@ import org.microg.gms.wearable.channel.OpenChannelCallback;
 import org.microg.gms.wearable.proto.AppKey;
 import org.microg.gms.wearable.proto.BackupBoolResponse;
 import org.microg.gms.wearable.proto.DataSyncTrackingMessage;
+import org.microg.gms.wearable.proto.PrivacySettings;
+import org.microg.gms.wearable.proto.PrivacyTimestamp;
+import org.microg.gms.wearable.proto.AccountConsentRecord;
+import org.microg.gms.wearable.proto.BackupErrorResponse;
+import org.microg.gms.wearable.proto.EnableBackupRequest;
+import org.microg.gms.wearable.proto.EnableBackupSkippedRequest;
 
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -91,6 +100,47 @@ public class WearableServiceImpl extends IWearableService.Stub {
     private static final long DATA_SYNC_TRACKING_TIMEOUT_MS = 30_000L;
 
     private static final int WEAR_FEATURE_DISABLED = 4014;
+
+    private static final String CONSENT_PACKAGE = "com.google.android.gms";
+    private static final String PATH_PRIVACY_SETTINGS = "/privacy_settings";
+
+    private static final Object CONSENT_LOCK = new Object();
+
+    private static final int TERMS_CONTEXT_UNSUPERVISED = 0;
+    private static final int TERMS_CONTEXT_SUPERVISED = 1;
+
+    private static final int TERM_TOS = 0;
+    private static final int TERM_LOGGING = 1;
+    private static final int TERM_CLOUDSYNC = 2;
+    private static final int TERM_LOCATION = 3;
+    private static final int TERM_UPDATES = 4;
+    private static final int TERM_BACKUP = 5;
+    private static final int OPT_IN_TYPE_BACKUP = 4;
+
+    private static final String PATH_ENABLE_BACKUP = "/backup_settings/enable_backup";
+    private static final String PATH_ENABLE_BACKUP_SKIPPED = "/backup_settings/enable_backup_skipped";
+    private static final int FRAGMENT_COMPANION_TERMS_OF_SERVICE = 16;
+    private static final long ENABLE_BACKUP_RPC_TIMEOUT_MS = 15_000L;
+
+    private interface StatusSink {
+        void onStatus(int statusCode);
+    }
+
+    private static final class BackupAction {
+        final String nodeId;
+        final String accountName;
+        final boolean enable;
+
+        BackupAction(String nodeId, String accountName, boolean enable) {
+            this.nodeId = nodeId;
+            this.accountName = accountName;
+            this.enable = enable;
+        }
+    }
+
+    private interface ConsentOperation {
+        void run() throws Exception;
+    }
 
     public WearableServiceImpl(Context context, WearableImpl wearable, String packageName) {
         this.context = context;
@@ -557,39 +607,232 @@ public class WearableServiceImpl extends IWearableService.Stub {
         });
     }
 
-    @Override
-    public void getConsentStatus(IWearableCallbacks callbacks) throws RemoteException {
-        Log.d(TAG, "unimplemented Method: getConsentStatus");
-
-        // needed proper implementation
-        this.wearable.networkHandler.post(new CallbackRunnable(callbacks) {
-            @Override
-            public void run(IWearableCallbacks callbacks) throws RemoteException {
-                try {
-                    // get data from Tos activity? idk,
-                    // maybe need some Consent manager or something
-                    ConsentResponse cr = new ConsentResponse(
-                            0,
-                            true,
-                            false,
-                            false,
-                            false,
-                            null,
-                            wearable.getLocalNodeId(),
-                            System.currentTimeMillis()
-                    );
-                    callbacks.onConsentResponse(cr);
-                    Log.d(TAG, cr.toString());
-
-                } catch (Exception e) {
-                    Log.e(TAG, "getConsentStatus exception", e);
-                    callbacks.onConsentResponse(new ConsentResponse(
-                            13, false, false, false, false,
-                            null, null, null
-                    ));
+    private void postConsentOperation(IWearableCallbacks callbacks, String name, ConsentOperation operation) {
+        wearable.networkHandler.post(() -> {
+            int code = CommonStatusCodes.SUCCESS;
+            try {
+                synchronized (CONSENT_LOCK) {
+                    operation.run();
                 }
+            } catch (Exception e) {
+                Log.w(TAG, name + " failed", e);
+                code = CommonStatusCodes.ERROR;
+            }
+            try {
+                callbacks.onStatus(new Status(code));
+            } catch (RemoteException e) {
+                Log.w(TAG, name + ": onStatus failed", e);
             }
         });
+    }
+
+    private void postConsentResponse(IWearableCallbacks callbacks, String nodeId) {
+        wearable.networkHandler.post(new CallbackRunnable(callbacks) {
+            @Override
+            public void run(IWearableCallbacks callbacks) throws RemoteException {
+                ConsentResponse response;
+                try {
+                    synchronized (CONSENT_LOCK) {
+                        response = toConsentResponse(getPrivacySettings(nodeId));
+                    }
+                } catch (Exception e) {
+                    Log.e(TAG, "getConsentStatus exception", e);
+                    response = new ConsentResponse(CommonStatusCodes.ERROR, false, false, false, false, null, null, null);
+                }
+                callbacks.onConsentResponse(response);
+            }
+        });
+    }
+
+    private static String consentPath(String nodeId) {
+        return TextUtils.isEmpty(nodeId) ? PATH_PRIVACY_SETTINGS : PATH_PRIVACY_SETTINGS + "/" + nodeId;
+    }
+
+    private PrivacySettings readPrivacySettings(String nodeId) {
+        Uri uri = new Uri.Builder().scheme("wear").authority("").path(consentPath(nodeId)).build();
+        DataItemRecord record = wearable.getDataItemByUri(uri, CONSENT_PACKAGE);
+        if (record == null || record.deleted || record.dataItem == null || record.dataItem.data == null) {
+            Log.d(TAG, "Consent data item does not exist for " + (nodeId == null ? "global" : nodeId));
+            return null;
+        }
+        try {
+            return PrivacySettings.ADAPTER.decode(record.dataItem.data);
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to parse consent record from dataitem", e);
+        }
+    }
+
+    private PrivacySettings getPrivacySettings(String nodeId) {
+        if (!TextUtils.isEmpty(nodeId)) {
+            PrivacySettings perWatch = readPrivacySettings(nodeId);
+            if (perWatch != null) return perWatch;
+        }
+        return readPrivacySettings(null);
+    }
+
+    private void writePrivacySettings(PrivacySettings.Builder builder, String nodeId) {
+        PrivacySettings partial = builder.build();
+        builder.loggingConsent(Boolean.TRUE.equals(partial.loggingConsent));
+        builder.cloudSyncConsent(Boolean.TRUE.equals(partial.cloudSyncConsent));
+        builder.locationConsent(Boolean.TRUE.equals(partial.locationConsent));
+
+        long now = System.currentTimeMillis();
+        builder.lastUpdateRequested(new PrivacyTimestamp.Builder()
+                .seconds(now / 1000)
+                .nanos((int) ((now % 1000) * 1_000_000))
+                .build());
+        if (!TextUtils.isEmpty(nodeId)) builder.nodeId(nodeId);
+        putPrivacySettings(builder.build(), nodeId);
+    }
+    private void putPrivacySettings(PrivacySettings settings, String nodeId) {
+        Log.d(TAG, "Saving wearable consent to record " + consentPath(nodeId));
+        wearable.putData(PutDataRequest.create(consentPath(nodeId))
+                .setData(PrivacySettings.ADAPTER.encode(settings)), CONSENT_PACKAGE);
+    }
+
+    private static ConsentResponse toConsentResponse(PrivacySettings settings) {
+        if (settings == null) {
+            return new ConsentResponse(0, false, false, false, false, null, null, null);
+        }
+        Long lastUpdate = null;
+        if (settings.lastUpdateRequested != null) {
+            long seconds = settings.lastUpdateRequested.seconds != null ? settings.lastUpdateRequested.seconds : 0L;
+            int nanos = settings.lastUpdateRequested.nanos != null ? settings.lastUpdateRequested.nanos : 0;
+            lastUpdate = seconds * 1000L + nanos / 1_000_000;
+        }
+        List<AccountConsentRecordParcelable> accounts = null;
+        if (!settings.accountConsents.isEmpty()) {
+            accounts = new ArrayList<>();
+            for (AccountConsentRecord record : settings.accountConsents) {
+                accounts.add(new AccountConsentRecordParcelable(
+                        record.accountName, Boolean.TRUE.equals(record.consentGranted)));
+            }
+        }
+        return new ConsentResponse(
+                0,
+                true,
+                Boolean.TRUE.equals(settings.loggingConsent),
+                Boolean.TRUE.equals(settings.cloudSyncConsent),
+                Boolean.TRUE.equals(settings.locationConsent),
+                accounts,
+                TextUtils.isEmpty(settings.nodeId) ? null : settings.nodeId,
+                lastUpdate);
+    }
+
+    private static PrivacySettings.Builder builderFrom(PrivacySettings base) {
+        return base != null ? base.newBuilder() : new PrivacySettings.Builder();
+    }
+
+    private static boolean isOptInTermType(int termType) {
+        return termType == TERM_LOGGING || termType == TERM_CLOUDSYNC || termType == TERM_LOCATION;
+    }
+
+    private static void setOptIn(PrivacySettings.Builder builder, int termType, boolean value) {
+        switch (termType) {
+            case TERM_LOGGING:
+                builder.loggingConsent(value);
+                break;
+            case TERM_CLOUDSYNC:
+                builder.cloudSyncConsent(value);
+                break;
+            case TERM_LOCATION:
+                builder.locationConsent(value);
+                break;
+            default:
+                throw new IllegalArgumentException("Not an opt-in term type: " + termType);
+        }
+    }
+
+    private static int[] getTermTypes(int termsContext) {
+        switch (termsContext) {
+            case TERMS_CONTEXT_UNSUPERVISED:
+                return new int[]{TERM_TOS, TERM_LOCATION, TERM_LOGGING, TERM_BACKUP, TERM_UPDATES, TERM_CLOUDSYNC};
+            case TERMS_CONTEXT_SUPERVISED:
+                return new int[]{TERM_TOS, TERM_LOCATION, TERM_LOGGING, TERM_UPDATES};
+            default:
+                return null;
+        }
+    }
+
+    private static boolean contains(int[] values, int value) {
+        for (int v : values) if (v == value) return true;
+        return false;
+    }
+
+    private static int[] requireTermTypes(int termsContext, String parentGaiaId, String childGaiaId) {
+        if (termsContext == TERMS_CONTEXT_SUPERVISED
+                && (TextUtils.isEmpty(parentGaiaId) || TextUtils.isEmpty(childGaiaId))) {
+            throw new IllegalStateException("Consent requires parent and child Gaia Id: " + termsContext);
+        }
+        int[] termTypes = getTermTypes(termsContext);
+        if (termTypes == null) {
+            throw new IllegalArgumentException("Invalid TermsContext " + termsContext);
+        }
+        return termTypes;
+    }
+
+    private BackupAction doAcceptTerms(AcceptTermsRequest request) {
+        int[] valid = requireTermTypes(request.termsContext, request.parentGaiaId, request.childGaiaId);
+        List<?> accepted = request.acceptedTermTypes;
+        if (accepted == null) accepted = Collections.emptyList();
+        for (Object type : accepted) {
+            if (!(type instanceof Integer) || !contains(valid, (Integer) type)) {
+                throw new IllegalStateException("Accepted terms contains invalid term type for termsContext " + request.termsContext);
+            }
+        }
+
+        String consentNodeId = null;
+        if (request.perWatchConsents) {
+            if (TextUtils.isEmpty(request.nodeId)) {
+                throw new IllegalStateException("Node ID not provided for consents per watch.");
+            }
+            consentNodeId = request.nodeId;
+        }
+
+        PrivacySettings.Builder builder = builderFrom(getPrivacySettings(consentNodeId));
+        for (int type : new int[]{TERM_LOGGING, TERM_LOCATION, TERM_CLOUDSYNC}) {
+            if (contains(valid, type)) setOptIn(builder, type, accepted.contains(type));
+        }
+        writePrivacySettings(builder, consentNodeId);
+
+        if (accepted.contains(TERM_BACKUP)) {
+            if (TextUtils.isEmpty(request.nodeId) || TextUtils.isEmpty(request.accountName)) {
+                Log.w(TAG, "acceptTerms called with TermType.BACKUP but missing nodeId or accountName.");
+                return null;
+            }
+            return new BackupAction(request.nodeId, request.accountName, true);
+        }
+        List<?> skipped = request.skippedTermTypes;
+        if (skipped != null && skipped.contains(TERM_BACKUP) && !TextUtils.isEmpty(request.nodeId)) {
+            return new BackupAction(request.nodeId, null, false);
+        }
+        return null;
+    }
+
+    private void doRecordTermConsent(RecordTermConsentRequest request) {
+        int[] valid = requireTermTypes(request.termsContext, request.parentGaiaId, request.childGaiaId);
+        if (!contains(valid, request.termType)) {
+            throw new IllegalStateException("Invalid termType " + request.termType + " for termsContext " + request.termsContext);
+        }
+        if (!isOptInTermType(request.termType)) {
+            throw new IllegalStateException("Invalid term type for recordTermConsent");
+        }
+        updateOptIn(request.accountId, request.termType, request.consentGranted);
+    }
+
+    private void updateOptIn(String nodeId, int termType, boolean value) {
+        PrivacySettings current = getPrivacySettings(nodeId);
+        if (current == null) {
+            Log.w(TAG, "updateOptIn: no existing consent record, creating one");
+        }
+        PrivacySettings.Builder builder = builderFrom(current);
+        setOptIn(builder, termType, value);
+        writePrivacySettings(builder, nodeId);
+    }
+
+    @Override
+    public void getConsentStatus(IWearableCallbacks callbacks) throws RemoteException {
+        postConsentResponse(callbacks, null);
     }
 
     @Override
@@ -597,38 +840,145 @@ public class WearableServiceImpl extends IWearableService.Stub {
         Log.d(TAG, "unimplemented Method addAccountToConsent: "
                 + "account=" + request.accountName
                 + ", consent=" + request.consentGranted);
-        // return success, just to prevent possible hanging
-        callbacks.onStatus(Status.SUCCESS);
+        postMain(callbacks, () -> callbacks.onStatus(Status.SUCCESS));
     }
 
+    @RequiresPermission(Manifest.permission.GET_ACCOUNTS)
+    private void doRecordSwaadlOptIn() {
+        PrivacySettings current = readPrivacySettings(null);
+        if (current == null) throw new IllegalStateException("Consent record not available");
+        List<AccountConsentRecord> records = new ArrayList<>();
+        for (Account account : AccountManager.get(context).getAccountsByType("com.google")) {
+            records.add(new AccountConsentRecord.Builder()
+                    .accountName(account.name)
+                    .consentGranted(false)
+                    .build());
+        }
+        Log.d(TAG, "Writing sWAADL consent for " + records.size() + " account(s)");
+        putPrivacySettings(current.newBuilder().accountConsents(records).build(), null);
+    }
+
+    private void sendBackupRequest(BackupAction action, StatusSink sink) {
+        String path;
+        byte[] payload;
+        if (action.enable) {
+            path = PATH_ENABLE_BACKUP;
+            payload = EnableBackupRequest.ADAPTER.encode(new EnableBackupRequest.Builder()
+                    .accountName(action.accountName).inSetup(true).flag(false).build());
+        } else {
+            path = PATH_ENABLE_BACKUP_SKIPPED;
+            payload = EnableBackupSkippedRequest.ADAPTER.encode(new EnableBackupSkippedRequest.Builder()
+                    .fragmentType(FRAGMENT_COMPANION_TERMS_OF_SERVICE).flag(false).build());
+        }
+        Log.d(TAG, "sendBackupRequest: " + path + " node=" + action.nodeId);
+        int messageId = wearable.sendRequest(packageName, action.nodeId, path, payload, new MessageOptions(0));
+        if (messageId < 0) {
+            Log.w(TAG, "sendBackupRequest: sendRequest failed for " + path);
+            sink.onStatus(CommonStatusCodes.ERROR);
+            return;
+        }
+        wearable.getRpcHelper().addResponseListener(action.nodeId, messageId, ENABLE_BACKUP_RPC_TIMEOUT_MS,
+                data -> {
+                    int code = CommonStatusCodes.SUCCESS;
+                    if (data != null && data.length > 0) {
+                        try {
+                            BackupErrorResponse response = BackupErrorResponse.ADAPTER.decode(data);
+                            if (response.errorCode != null) {
+                                Log.w(TAG, path + " failed on the watch, error=" + response.errorCode);
+                                code = CommonStatusCodes.ERROR;
+                            }
+                        } catch (IOException e) {
+                            Log.w(TAG, path + ": failed to decode response", e);
+                            code = CommonStatusCodes.ERROR;
+                        }
+                    }
+                    sink.onStatus(code);
+                },
+                () -> {
+                    Log.w(TAG, path + ": RPC timeout for node " + action.nodeId);
+                    sink.onStatus(CommonStatusCodes.ERROR);
+                });
+    }
+
+    private void postStatus(IWearableCallbacks callbacks, String name, int statusCode) {
+        mainHandler.post(() -> {
+            try {
+                callbacks.onStatus(new Status(statusCode));
+            } catch (RemoteException e) {
+                Log.w(TAG, name + ": onStatus failed", e);
+            }
+        });
+    }
+
+    private GetTermsResponse buildTermsResponse(int termsContext) {
+        List<WearableTerms.TermDef> defs = WearableTerms.forContext(termsContext);
+        if (defs == null) {
+            Log.w(TAG, "No terms available for " + termsContext);
+            return new GetTermsResponse(CommonStatusCodes.INTERNAL_ERROR, Collections.<Term>emptyList());
+        }
+        List<Term> terms = new ArrayList<>();
+        for (WearableTerms.TermDef def : defs) {
+            terms.add(new Term(def.termType, def.getDescription(context), def.explicit,
+                    def.getTitle(context), null, def.getOptInType()));
+        }
+        return new GetTermsResponse(CommonStatusCodes.SUCCESS, terms);
+    }
+
+    @RequiresPermission(Manifest.permission.GET_ACCOUNTS)
     @Override
     public void acceptTerms(IWearableCallbacks callbacks, AcceptTermsRequest request) throws RemoteException {
-        Log.d(TAG, "acceptTerms");
-        postMain(callbacks, () -> callbacks.onStatus(new Status(WEAR_FEATURE_DISABLED)));
+        Log.d(TAG, "acceptTerms: context=" + request.termsContext + ", accepted=" + request.acceptedTermTypes
+                + ", skipped=" + request.skippedTermTypes + ", node=" + request.nodeId
+                + ", perWatch=" + request.perWatchConsents);
+        wearable.networkHandler.post(() -> {
+            BackupAction backup;
+            try {
+                synchronized (CONSENT_LOCK) {
+                    backup = doAcceptTerms(request);
+                }
+            } catch (Exception e) {
+                Log.w(TAG, "acceptTerms failed", e);
+                postStatus(callbacks, "acceptTerms", CommonStatusCodes.ERROR);
+                return;
+            }
+            try {
+                synchronized (CONSENT_LOCK) {
+                    doRecordSwaadlOptIn();
+                }
+            } catch (Exception e) {
+                Log.w(TAG, "acceptTerms: recordSwaadlOptIn failed", e);
+            }
+            if (backup == null) {
+                postStatus(callbacks, "acceptTerms", CommonStatusCodes.SUCCESS);
+            } else {
+                sendBackupRequest(backup, code -> postStatus(callbacks, "acceptTerms", code));
+            }
+        });
     }
 
     @Override
     public void recordTermConsent(IWearableCallbacks callbacks, RecordTermConsentRequest request) throws RemoteException {
-        Log.d(TAG, "recordTermConsent");
-        postMain(callbacks, () -> callbacks.onStatus(new Status(WEAR_FEATURE_DISABLED)));
+        Log.d(TAG, "recordTermConsent: context=" + request.termsContext + ", type=" + request.termType
+                + ", granted=" + request.consentGranted);
+        postConsentOperation(callbacks, "recordTermConsent", () -> doRecordTermConsent(request));
     }
 
     @Override
-    public void getTerms(IWearableCallbacks callbacks, int i) throws RemoteException {
-        Log.d(TAG, "getTerms: " + i);
-        postMain(callbacks, () -> callbacks.onStatus(new Status(WEAR_FEATURE_DISABLED)));
+    public void getTerms(IWearableCallbacks callbacks, int termsContext) throws RemoteException {
+        Log.d(TAG, "getTerms: " + termsContext);
+        postMain(callbacks, () -> callbacks.onGetTermsResponse(buildTermsResponse(termsContext)));
     }
 
     @Override
     public void getConsentStatusForRequest(IWearableCallbacks callbacks, ConsentStatusRequest request) throws RemoteException {
-        Log.d(TAG, "getConsentStatusForRequest");
-        postMain(callbacks, () -> callbacks.onStatus(new Status(WEAR_FEATURE_DISABLED)));
+        Log.d(TAG, "getConsentStatusForRequest: node=" + request.status);
+        postConsentResponse(callbacks, request.status);
     }
 
     @Override
     public void recordSwaadlOptIn(IWearableCallbacks callbacks) throws RemoteException {
         Log.d(TAG, "recordSwaadlOptIn");
-        postMain(callbacks, () -> callbacks.onStatus(new Status(WEAR_FEATURE_DISABLED)));
+        postConsentOperation(callbacks, "recordSwaadlOptIn", this::doRecordSwaadlOptIn);
     }
 
     @Override
@@ -1321,15 +1671,18 @@ public class WearableServiceImpl extends IWearableService.Stub {
             throws RemoteException {
         Log.d(TAG, "PrivacyRecordOptinRequest: type=" + request.optInType
                 + " optedIn=" + request.optedIn + " node=" + request.nodeId);
-        postMain(callbacks, () -> {
-            // types: 1=LOGGING, 2=CLOUDSYNC, 3=LOCATION, 4=BACKUP
-            if (request.optInType < 1 || request.optInType > 4) {
-                Log.e(TAG, "onPrivacyRecordOptinRequest: invalid optInType " + request.optInType);
-                callbacks.onStatus(new Status(CommonStatusCodes.ERROR));
-                return;
-            }
-            callbacks.onStatus(Status.SUCCESS);
-        });
+        // types: 1=LOGGING, 2=CLOUDSYNC, 3=LOCATION, 4=BACKUP
+        if (request.optInType < 1 || request.optInType > 4) {
+            Log.e(TAG, "onPrivacyRecordOptinRequest: invalid optInType " + request.optInType);
+            postMain(callbacks, () -> callbacks.onStatus(new Status(CommonStatusCodes.ERROR)));
+            return;
+        }
+        if (request.optInType == OPT_IN_TYPE_BACKUP) {
+            postMain(callbacks, () -> callbacks.onStatus(Status.SUCCESS));
+            return;
+        }
+        postConsentOperation(callbacks, "recordOptIn",
+                () -> updateOptIn(request.nodeId, request.optInType, request.optedIn));
     }
 
     private long getTableSizeForAppKey(SQLiteDatabase db, String tableName,

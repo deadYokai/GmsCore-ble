@@ -291,3 +291,36 @@ message DataSyncTrackingMessage {
     optional int64 sequenceId = 2;
 }
 
+message PrivacySettings {
+    optional bool loggingConsent = 1;
+    optional bool cloudSyncConsent = 2;
+    optional bool locationConsent = 3;
+    repeated AccountConsentRecord accountConsents = 5;
+    optional string nodeId = 6;
+    optional PrivacyTimestamp lastUpdateRequested = 7;
+}
+
+message PrivacyTimestamp {
+    optional int64 seconds = 1;
+    optional int32 nanos = 2;
+}
+
+message AccountConsentRecord {
+    optional string accountName = 1;
+    optional bool consentGranted = 2;
+}
+
+message EnableBackupRequest {
+    optional string accountName = 1;
+    optional bool inSetup = 3;
+    optional bool flag = 4; // set from a GMS server flag
+}
+
+message EnableBackupSkippedRequest {
+    optional int32 fragmentType = 1;
+    optional bool flag = 2;
+}
+
+message BackupErrorResponse {
+    optional int32 errorCode = 1;
+}
