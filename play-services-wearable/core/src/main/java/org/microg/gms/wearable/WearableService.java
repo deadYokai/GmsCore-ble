@@ -16,10 +16,13 @@
 
 package org.microg.gms.wearable;
 
+import android.Manifest;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.os.Build;
 import android.os.RemoteException;
+
+import androidx.annotation.RequiresPermission;
 
 import com.google.android.gms.common.Feature;
 import com.google.android.gms.common.api.CommonStatusCodes;
@@ -99,6 +102,7 @@ public class WearableService extends BaseService {
         }
     }
 
+    @RequiresPermission(Manifest.permission.BLUETOOTH_SCAN)
     @Override
     public void onDestroy() {
         super.onDestroy();
