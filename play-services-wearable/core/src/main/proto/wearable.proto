@@ -297,12 +297,7 @@ message PrivacySettings {
     optional bool locationConsent = 3;
     repeated AccountConsentRecord accountConsents = 5;
     optional string nodeId = 6;
-    optional PrivacyTimestamp lastUpdateRequested = 7;
-}
-
-message PrivacyTimestamp {
-    optional int64 seconds = 1;
-    optional int32 nanos = 2;
+    optional ProtoDuration lastUpdateRequested = 7;
 }
 
 message AccountConsentRecord {
@@ -323,4 +318,40 @@ message EnableBackupSkippedRequest {
 
 message BackupErrorResponse {
     optional int32 errorCode = 1;
+}
+
+message ProtoDuration {
+    optional int64 seconds = 1;
+    optional int32 nanos = 2;
+}
+
+message WifiConfigurationInfo {
+    enum WifiSecurityType {
+        SECURITY_NONE = 0;
+        SECURITY_WPA_PSK = 1;
+        SECURITY_WPA_EAP = 2;
+        SECURITY_SAE = 8;
+        SECURITY_OWE = 9;
+    }
+    optional string ssid = 1;
+    optional bool hiddenSsid = 2;
+    optional WifiSecurityType securityType = 3;
+    optional string preSharedKey = 4;
+    optional string wepKey = 5;
+    optional bool allowAutoJoin = 6;
+    optional int32 macRandomizationSetting = 7;
+}
+
+message WifiConfigurationList {
+    repeated WifiConfigurationInfo networks = 1;
+}
+
+message WifiConnectRequest {
+    optional WifiConfigurationInfo config = 1;
+    optional ProtoDuration timeout = 2;
+}
+
+message WifiConnectResponse {
+    // 1 success, 2 invalid request, 3 network unavailable/timeout, 4 SDK too old
+    optional int32 result = 1;
 }
