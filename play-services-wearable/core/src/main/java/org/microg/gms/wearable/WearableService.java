@@ -40,7 +40,7 @@ public class WearableService extends BaseService {
             new Feature("carrier_auth", 1L),
             new Feature("wear3_oem_companion", 1L),
             new Feature("wear_await_data_sync_complete", 1L),
-            new Feature("wear_backup_restore", 6L),
+            new Feature("wear_backup_restore", 8L),
             new Feature("wear_consent", 2L),
             new Feature("wear_consent_recordoptin", 1L),
             new Feature("wear_consent_recordoptin_swaadl", 1L),
@@ -64,7 +64,11 @@ public class WearableService extends BaseService {
             new Feature("wear_customizable_screens", 2L),
             new Feature("wear_wifi_immediate_connect", 1L),
             new Feature("wear_get_node_active_network_metered", 1L),
-            new Feature("wear_consents_per_watch", 3L)
+            new Feature("wear_consents_per_watch", 3L),
+            new Feature("wear_material3_experience", 1L),
+            new Feature("wear_offload_connection", 1L),
+            new Feature("wear_get_local_capabilities", 1L),
+            new Feature("wear_notify_channel_flushed", 1L)
     };
 
     private static final String CHANNEL_ID = "wearable_service";
