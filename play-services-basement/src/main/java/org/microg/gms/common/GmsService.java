@@ -355,7 +355,7 @@ public enum GmsService {
     APP_ERROR(334, "com.google.android.gms.apperrors.service.START_APP_ERROR"),
     ADID(335),
 
-    HOME(336),
+    HOME(336, "com.google.android.gms.home.interaction.START"),
 
     MLBENCHMARK(339),
     MLBENCHMARK_INSTALLER(340),
@@ -370,7 +370,7 @@ public enum GmsService {
     GOOGLESETTINGS(349),
     HTTPFLAGS(350),
     SETUP_SERVICES_REMOTE_SETUP(351),
-    IDENTITY_CREDENTIALS(352),
+    IDENTITY_CREDENTIALS(352, "com.google.android.gms.identitycredentials.service.START"),
     AMBIENT_CONTEXT(353),
     SAFE_BROWSING(354),
     MULTIDEVICE_API_FEATURE_SETTINGS(355),

@@ -17,6 +17,7 @@
 package org.microg.gms.ui;
 
 import static org.microg.gms.accountsettings.ui.ExtensionsKt.ACTION_LOCATION_SHARING;
+import static org.microg.gms.accountsettings.ui.ExtensionsKt.EXTRA_ACCOUNT_NAME;
 
 import android.app.Activity;
 import android.content.Intent;
@@ -27,6 +28,9 @@ import org.microg.gms.accountsettings.ui.MainActivity;
 
 public class LocationSettingsActivity extends Activity {
 
+    private final static String ACCOUNT_NAME = "account_name";
+    private final static String ACCOUNT_NAME_V2 = "accountName";
+
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -34,6 +38,19 @@ public class LocationSettingsActivity extends Activity {
             if (ACTION_LOCATION_SHARING.equals(getIntent().getAction())) {
                 Intent intent = new Intent(this, MainActivity.class);
                 intent.setAction(ACTION_LOCATION_SHARING);
+                Bundle extras = getIntent().getExtras();
+                if (extras != null) {
+                    String accountName = null;
+                    if (extras.containsKey(ACCOUNT_NAME)) {
+                        accountName = extras.getString(ACCOUNT_NAME);
+                    }
+                    else if (extras.containsKey(ACCOUNT_NAME_V2)) {
+                        accountName = extras.getString(ACCOUNT_NAME_V2);
+                    }
+                    if (accountName != null) {
+                        intent.putExtra(EXTRA_ACCOUNT_NAME, accountName);
+                    }
+                }
                 startActivity(intent);
             }
         } catch (Exception ignore) {
