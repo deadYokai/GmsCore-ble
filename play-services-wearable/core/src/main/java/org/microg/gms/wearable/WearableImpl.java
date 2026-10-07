@@ -650,7 +650,7 @@ public class WearableImpl {
     }
 
 
-    void syncRecordToAll(DataItemRecord record) {
+    public void syncRecordToAll(DataItemRecord record) {
         for (String nodeId : new ArrayList<String>(activeConnections.keySet())) {
             syncRecordToPeer(nodeId, record);
         }
