@@ -1025,41 +1025,50 @@ public class WearableServiceImpl extends IWearableService.Stub {
 
     @Override
     public void logCounter(IWearableCallbacks callbacks, LogCounterRequest request) throws RemoteException {
-        Log.d(TAG, "unimplemented Method logCounter: "
-                + request.counterName
-                + ", value=" + request.value
-                + ", increment=" + request.increment);
-
+        Log.d(TAG, "logCounter: " + (request == null ? "null"
+                : request.counterName + ", value=" + request.value + ", increment=" + request.increment));
         postMain(callbacks, () -> {
-            callbacks.onStatus(new Status(0));
+            if (request == null || TextUtils.isEmpty(request.counterName)) {
+                callbacks.onStatus(new Status(CommonStatusCodes.DEVELOPER_ERROR));
+                return;
+            }
+            WearableLogStore.INSTANCE.counter(request.counterName, request.value, request.increment);
+            callbacks.onStatus(Status.SUCCESS);
         });
     }
 
     @Override
     public void logEvent(IWearableCallbacks callbacks, LogEventRequest request) throws RemoteException {
-        Log.d(TAG, "unimplemented Method logEvent: data length="
-                + (request.eventData != null ? request.eventData.length : 0));
-
+        Log.d(TAG, "logEvent: data length=" + (request != null && request.eventData != null ? request.eventData.length : 0));
         postMain(callbacks, () -> {
-            callbacks.onStatus(new Status(0));
+            if (request == null) {
+                callbacks.onStatus(new Status(CommonStatusCodes.DEVELOPER_ERROR));
+                return;
+            }
+            WearableLogStore.INSTANCE.event(request.eventData != null ? request.eventData.length : 0);
+            callbacks.onStatus(Status.SUCCESS);
         });
     }
 
     @Override
     public void logTimer(IWearableCallbacks callbacks, LogTimerRequest request) throws RemoteException {
-        Log.d(TAG, "unimplemented Method logTimer: " + request.timerName
-                + ", timestamp=" + request.timestamp);
-
+        Log.d(TAG, "logTimer: " + (request == null ? "null" : request.timerName + ", timestamp=" + request.timestamp));
         postMain(callbacks, () -> {
-            callbacks.onStatus(new Status(0));
+            if (request == null || TextUtils.isEmpty(request.timerName)) {
+                callbacks.onStatus(new Status(CommonStatusCodes.DEVELOPER_ERROR));
+                return;
+            }
+            WearableLogStore.INSTANCE.timer(request.timerName, request.timestamp);
+            callbacks.onStatus(Status.SUCCESS);
         });
     }
 
     @Override
     public void clearLogs(IWearableCallbacks callbacks) throws RemoteException {
-        Log.d(TAG, "unimplemented Method clearLogs");
+        Log.d(TAG, "clearLogs");
         postMain(callbacks, () -> {
-            callbacks.onStatus(new Status(0));
+            WearableLogStore.INSTANCE.clear();
+            callbacks.onStatus(Status.SUCCESS);
         });
     }
 
