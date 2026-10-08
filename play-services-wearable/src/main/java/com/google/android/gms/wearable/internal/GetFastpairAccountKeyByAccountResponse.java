@@ -20,6 +20,17 @@ import org.microg.safeparcel.AutoSafeParcelable;
 import org.microg.safeparcel.SafeParceled;
 
 public class GetFastpairAccountKeyByAccountResponse extends AutoSafeParcelable {
+	@SafeParceled(1)
+	public int status;
+	@SafeParceled(2)
+	public FastPairAccountKeyParcelable accountKey;
+
+	private GetFastpairAccountKeyByAccountResponse() {}
+
+	public GetFastpairAccountKeyByAccountResponse(int status, FastPairAccountKeyParcelable accountKey) {
+		this.status = status;
+		this.accountKey = accountKey;
+	}
 
 	public static final Creator<GetFastpairAccountKeyByAccountResponse> CREATOR = new AutoCreator<GetFastpairAccountKeyByAccountResponse>(GetFastpairAccountKeyByAccountResponse.class);
 }

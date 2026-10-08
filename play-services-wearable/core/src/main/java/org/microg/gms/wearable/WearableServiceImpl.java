@@ -25,12 +25,13 @@ import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
 import android.net.Uri;
-import android.net.wifi.WifiInfo;
+import android.os.Binder;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Parcel;
 import android.os.ParcelFileDescriptor;
 import android.os.RemoteException;
+import android.telephony.TelephonyManager;
 import android.text.TextUtils;
 import android.util.Base64;
 import android.util.Log;
@@ -71,6 +72,8 @@ import org.microg.gms.wearable.proto.EnableBackupSkippedRequest;
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -144,6 +147,13 @@ public class WearableServiceImpl extends IWearableService.Stub {
 
     private interface ConsentOperation {
         void run() throws Exception;
+    }
+
+    private WearFastPairManager fastPairManager;
+
+    private synchronized WearFastPairManager getFastPairManager() {
+        if (fastPairManager == null) fastPairManager = new WearFastPairManager(context);
+        return fastPairManager;
     }
 
     public WearableServiceImpl(Context context, WearableImpl wearable, String packageName) {
@@ -545,7 +555,12 @@ public class WearableServiceImpl extends IWearableService.Stub {
 
         // dummy
         postMain(callbacks, () -> {
-            callbacks.onStatus(Status.SUCCESS);
+            try {
+                callbacks.onStatus(Status.SUCCESS);
+            } catch (Exception e) {
+                Log.e(TAG, "setCloudSyncSettingByNode: exception during processing", e);
+                callbacks.onStatus(Status.INTERNAL_ERROR);
+            }
         });
     }
 
@@ -555,8 +570,19 @@ public class WearableServiceImpl extends IWearableService.Stub {
         postMain(callbacks, () -> {
             // TODO: Access control
             try {
-                callbacks.onGetFdForAssetResponse(new GetFdForAssetResponse(0, ParcelFileDescriptor.open(wearable.createAssetFile(asset.getDigest()), ParcelFileDescriptor.MODE_READ_ONLY)));
+                File file = wearable.createAssetFile(asset.getDigest());
+
+                if (!file.canExecute() || !file.isFile()) {
+                    callbacks.onGetFdForAssetResponse(new GetFdForAssetResponse(4005, null));
+                    return;
+                }
+
+                ParcelFileDescriptor pfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY);
+                callbacks.onGetFdForAssetResponse(new GetFdForAssetResponse(0, null));
             } catch (FileNotFoundException e) {
+                callbacks.onGetFdForAssetResponse(new GetFdForAssetResponse(4005, null));
+            } catch (Exception e) {
+                Log.e(TAG, "getFdForAsset: exception during processing", e);
                 callbacks.onGetFdForAssetResponse(new GetFdForAssetResponse(8, null));
             }
         });
@@ -1259,36 +1285,165 @@ public class WearableServiceImpl extends IWearableService.Stub {
         });
     }
 
+    private static final int INVALID_SUBSCRIPTION_ID = -1;
+    private static final int APPTYPE_USIM = 2;
+    private static final int AUTHTYPE_EAP_AKA = 129;
+    private static final String EAP_IDENTITY_PREFIX = "0";
+
+    private TelephonyManager getTelephonyManager(int subscriptionId) {
+        TelephonyManager tm = (TelephonyManager) context.getSystemService(Context.TELEPHONY_SERVICE);
+        if (tm == null) return null;
+        if (android.os.Build.VERSION.SDK_INT >= 26) {
+            return tm.createForSubscriptionId(subscriptionId);
+        }
+        return tm;
+    }
+
+    private static String iccAuthentication(TelephonyManager tm, String challenge) {
+        if (android.os.Build.VERSION.SDK_INT >= 26) {
+            return tm.getIccAuthentication(APPTYPE_USIM, TelephonyManager.AUTHTYPE_EAP_AKA, challenge);
+        }
+        try {
+            Method m = TelephonyManager.class.getMethod("getIccAuthentication", int.class, int.class, String.class);
+            return (String) m.invoke(tm, APPTYPE_USIM, AUTHTYPE_EAP_AKA, challenge);
+        } catch (InvocationTargetException e) {
+            if (e.getCause() instanceof SecurityException) throw (SecurityException) e.getCause();
+            return null;
+        } catch (NoSuchMethodException | IllegalAccessException e) {
+            return null;
+        }
+    }
+
+    private static String buildEapIdentity(String imsi, String simOperator) {
+        if (TextUtils.isEmpty(imsi) || TextUtils.isEmpty(simOperator) || simOperator.length() < 5) {
+            return null;
+        }
+        String mcc = simOperator.substring(0, 3);
+        String mnc = simOperator.substring(3);
+        if (mnc.length() == 2) mnc = "0" + mnc;
+        return EAP_IDENTITY_PREFIX + imsi + "@wlan.mnc" + mnc + ".mcc" + mcc + ".3gppnetwork.org";
+    }
+
+    @RequiresPermission("android.permission.READ_PRIVILEGED_PHONE_STATE")
     @Override
     public void getEapId(IWearableCallbacks callbacks, int subscriptionId) throws RemoteException {
         Log.d(TAG, "getEapId: subscriptionId=" + subscriptionId);
-        // TODO
-        postMain(callbacks, () -> callbacks.onStatus(new Status(WEAR_FEATURE_DISABLED)));
+        postMain(callbacks, () -> {
+            if (subscriptionId == INVALID_SUBSCRIPTION_ID) {
+                callbacks.onGetEapIdResponse(new GetEapIdResponse(CommonStatusCodes.DEVELOPER_ERROR, ""));
+                return;
+            }
+            String eapId = null;
+            try {
+                TelephonyManager tm = getTelephonyManager(subscriptionId);
+                if (tm != null) eapId = buildEapIdentity(tm.getSubscriberId(), tm.getSimOperator());
+            } catch (SecurityException e) {
+                Log.w(TAG, "getEapId: missing phone state permission", e);
+            } catch (RuntimeException e) {
+                Log.w(TAG, "getEapId failed", e);
+            }
+            callbacks.onGetEapIdResponse(TextUtils.isEmpty(eapId)
+                    ? new GetEapIdResponse(CommonStatusCodes.ERROR, "")
+                    : new GetEapIdResponse(CommonStatusCodes.SUCCESS, eapId));
+        });
     }
 
     @Override
-    public void performEapAka(IWearableCallbacks callbacks, int subscriptionId, String s) throws RemoteException {
+    public void performEapAka(IWearableCallbacks callbacks, int subscriptionId, String challenge) throws RemoteException {
         Log.d(TAG, "performEapAka: subscriptionId=" + subscriptionId);
-        // TODO
-        postMain(callbacks, () -> callbacks.onStatus(new Status(WEAR_FEATURE_DISABLED)));
+        postMain(callbacks, () -> {
+            if (subscriptionId == INVALID_SUBSCRIPTION_ID || TextUtils.isEmpty(challenge)) {
+                callbacks.onPerformEapAkaResponse(new PerformEapAkaResponse(CommonStatusCodes.DEVELOPER_ERROR, ""));
+                return;
+            }
+            try {
+                Base64.decode(challenge, Base64.DEFAULT);
+            } catch (IllegalArgumentException e) {
+                callbacks.onPerformEapAkaResponse(new PerformEapAkaResponse(CommonStatusCodes.DEVELOPER_ERROR, ""));
+                return;
+            }
+
+            String result = null;
+            try {
+                TelephonyManager tm = getTelephonyManager(subscriptionId);
+                if (tm != null) result = iccAuthentication(tm, challenge);
+            } catch (SecurityException e) {
+                Log.w(TAG, "performEapAka: missing privileged phone state permission", e);
+            } catch (RuntimeException e) {
+                Log.w(TAG, "performEapAka failed", e);
+            }
+
+            callbacks.onPerformEapAkaResponse(TextUtils.isEmpty(result)
+                    ? new PerformEapAkaResponse(CommonStatusCodes.ERROR, "")
+                    : new PerformEapAkaResponse(CommonStatusCodes.SUCCESS, result));
+        });
     }
 
     @Override
     public void associateDeviceAndAccountWithFastPair(IWearableCallbacks callbacks, String s1, Account account, String s2, String s3) throws RemoteException {
-        Log.d(TAG, "associateDeviceAndAccountWithFastPair");
-        postMain(callbacks, () -> callbacks.onStatus(new Status(WEAR_FEATURE_DISABLED)));
+        Log.d(TAG, "associateDeviceAndAccountWithFastPair: " + packageName + " " + s3 + " " + s2 + " " + s1);
+        postMain(callbacks, () -> {
+            if (account == null || TextUtils.isEmpty(account.name)) {
+                callbacks.onStatus(new Status(CommonStatusCodes.DEVELOPER_ERROR));
+                return;
+            }
+            try {
+                getFastPairManager().getOrCreateAccountKey(account.name);
+                callbacks.onStatus(Status.SUCCESS);
+            } catch (Exception e) {
+                Log.e(TAG, "associateDeviceAndAccountWithFastPair failed", e);
+                callbacks.onStatus(new Status(CommonStatusCodes.INTERNAL_ERROR));
+            }
+        });
+
     }
 
     @Override
     public void getFastpairAccountKeys(IWearableCallbacks callbacks) throws RemoteException {
         Log.d(TAG, "getFastpairAccountKeys");
-        postMain(callbacks, () -> callbacks.onStatus(new Status(WEAR_FEATURE_DISABLED)));
+        postMain(callbacks, () -> {
+            try {
+                List<FastPairAccountKeyParcelable> keys = new ArrayList<>();
+                for (WearFastPairManager.AccountKeyRecord r : getFastPairManager().getAccountKeys()) {
+                    keys.add(new FastPairAccountKeyParcelable(r.accountKey));
+                }
+                callbacks.onGetFastpairAccountKeysResponse(
+                        new GetFastpairAccountKeysResponse(CommonStatusCodes.SUCCESS, keys));
+            } catch (Exception e) {
+                Log.e(TAG, "getFastpairAccountKeys failed", e);
+                callbacks.onGetFastpairAccountKeysResponse(
+                        new GetFastpairAccountKeysResponse(CommonStatusCodes.INTERNAL_ERROR, null));
+            }
+        });
     }
 
     @Override
     public void getFastpairAccountKeyByAccount(IWearableCallbacks callbacks, Account account) throws RemoteException {
         Log.d(TAG, "getFastpairAccountKeyByAccount: " + (account == null ? "null" : account.name));
-        postMain(callbacks, () -> callbacks.onStatus(new Status(WEAR_FEATURE_DISABLED)));
+
+        String[] pkgs = context.getPackageManager().getPackagesForUid(Binder.getCallingUid());
+        if (pkgs == null || !java.util.Arrays.asList(pkgs).contains(packageName)) {
+            throw new SecurityException(String.format("Package [%s] is not authorized", packageName));
+        }
+
+        postMain(callbacks, () -> {
+            if (account == null || TextUtils.isEmpty(account.name)) {
+                callbacks.onGetFastpairAccountKeyByAccountResponse(
+                        new GetFastpairAccountKeyByAccountResponse(CommonStatusCodes.DEVELOPER_ERROR, null));
+                return;
+            }
+            try {
+                WearFastPairManager.AccountKeyRecord r = getFastPairManager().getAccountKey(account.name);
+                callbacks.onGetFastpairAccountKeyByAccountResponse(new GetFastpairAccountKeyByAccountResponse(
+                        CommonStatusCodes.SUCCESS,
+                        r == null ? null : new FastPairAccountKeyParcelable(r.accountKey)));
+            } catch (Exception e) {
+                Log.e(TAG, "getFastpairAccountKeyByAccount failed", e);
+                callbacks.onGetFastpairAccountKeyByAccountResponse(
+                        new GetFastpairAccountKeyByAccountResponse(CommonStatusCodes.INTERNAL_ERROR, null));
+            }
+        });
+
     }
 
     @Override

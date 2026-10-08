@@ -25,13 +25,13 @@ public class GetFastpairAccountKeysResponse extends AutoSafeParcelable {
 	@SafeParceled(1)
 	public int status;
 	@SafeParceled(2)
-	public List unk2;
+	public List<FastPairAccountKeyParcelable> accountKeys;
 
-	private GetFastpairAccountKeysResponse(){}
+	private GetFastpairAccountKeysResponse() {}
 
-	public GetFastpairAccountKeysResponse(int status, List unk2) {
+	public GetFastpairAccountKeysResponse(int status, List<FastPairAccountKeyParcelable> accountKeys) {
 		this.status = status;
-		this.unk2 = unk2;
+		this.accountKeys = accountKeys;
 	}
 
 	public static final Creator<GetFastpairAccountKeysResponse> CREATOR = new AutoCreator<GetFastpairAccountKeysResponse>(GetFastpairAccountKeysResponse.class);
