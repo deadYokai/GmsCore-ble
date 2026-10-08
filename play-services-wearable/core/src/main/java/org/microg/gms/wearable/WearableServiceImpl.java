@@ -25,6 +25,7 @@ import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
 import android.net.Uri;
+import android.net.wifi.WifiInfo;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Parcel;
@@ -56,11 +57,12 @@ import org.microg.gms.wearable.channel.ChannelStatusCodes;
 import org.microg.gms.wearable.channel.ChannelToken;
 import org.microg.gms.wearable.channel.InvalidChannelTokenException;
 import org.microg.gms.wearable.channel.OpenChannelCallback;
+import org.microg.gms.wearable.network.WearableWifiService;
 import org.microg.gms.wearable.proto.AppKey;
 import org.microg.gms.wearable.proto.BackupBoolResponse;
 import org.microg.gms.wearable.proto.DataSyncTrackingMessage;
 import org.microg.gms.wearable.proto.PrivacySettings;
-import org.microg.gms.wearable.proto.PrivacyTimestamp;
+import org.microg.gms.wearable.proto.ProtoDuration;
 import org.microg.gms.wearable.proto.AccountConsentRecord;
 import org.microg.gms.wearable.proto.BackupErrorResponse;
 import org.microg.gms.wearable.proto.EnableBackupRequest;
@@ -121,6 +123,7 @@ public class WearableServiceImpl extends IWearableService.Stub {
     private static final String PATH_ENABLE_BACKUP_SKIPPED = "/backup_settings/enable_backup_skipped";
     private static final int FRAGMENT_COMPANION_TERMS_OF_SERVICE = 16;
     private static final long ENABLE_BACKUP_RPC_TIMEOUT_MS = 15_000L;
+
 
     private interface StatusSink {
         void onStatus(int statusCode);
@@ -677,7 +680,7 @@ public class WearableServiceImpl extends IWearableService.Stub {
         builder.locationConsent(Boolean.TRUE.equals(partial.locationConsent));
 
         long now = System.currentTimeMillis();
-        builder.lastUpdateRequested(new PrivacyTimestamp.Builder()
+        builder.lastUpdateRequested(new ProtoDuration.Builder()
                 .seconds(now / 1000)
                 .nanos((int) ((now % 1000) * 1_000_000))
                 .build());
@@ -2100,23 +2103,71 @@ public class WearableServiceImpl extends IWearableService.Stub {
         }
     }
 
+    private static void deliver(IWearableCallbacks callbacks, Status status) {
+        try {
+            callbacks.onStatus(status);
+        } catch (RemoteException e) {
+            Log.d(TAG, "Failed to deliver result to app", e);
+        }
+    }
+
+    @RequiresPermission(Manifest.permission.ACCESS_FINE_LOCATION)
     @Override
     public void syncWifiCredentials(IWearableCallbacks callbacks) throws RemoteException {
-        Log.d(TAG, "unimplemented Method: syncWifiCredentials");
-
-        postMain(callbacks, () -> {
-            // dummy stuff
-            callbacks.onStatus(new Status(0));
+        postNetwork(callbacks, () -> {
+            WearableWifiService service = wearable.getWearWifiService();
+            if (service == null) {
+                Log.e(TAG, "syncWifiCredentials: wifiService is null!");
+                deliver(callbacks, new Status(CommonStatusCodes.INTERNAL_ERROR));
+                return;
+            }
+            try {
+                deliver(callbacks, service.syncCredentials(true)
+                        ? Status.SUCCESS
+                        : new Status(WearableStatusCodes.WIFI_CREDENTIAL_SYNC_NO_CREDENTIAL_FETCHED));
+            } catch (RuntimeException e) {
+                Log.e(TAG, "syncWifiCredentials: exception during processing", e);
+                deliver(callbacks, new Status(CommonStatusCodes.INTERNAL_ERROR));
+            }
         });
     }
 
+    @RequiresPermission(Manifest.permission.ACCESS_FINE_LOCATION)
     @Override
-    public void syncWifiCredentialWithSsid(IWearableCallbacks callbacks, String ssid, String password) throws RemoteException {
-        Log.d(TAG, "unimplemented Method: syncWifiCredentialWithSsid");
+    public void syncWifiCredentialWithSsid(IWearableCallbacks callbacks, String nodeId, String ssid) throws RemoteException {
+        postNetwork(callbacks, () -> {
+            WearableWifiService service = wearable.getWearWifiService();
+            if (service == null) {
+                Log.e(TAG, "syncWifiCredential: wifiService is null!");
+                deliver(callbacks, new Status(CommonStatusCodes.INTERNAL_ERROR));
+                return;
+            }
+            try {
+                service.syncCredentialToNode(nodeId, ssid, status -> deliver(callbacks, status));
+            } catch (RuntimeException e) {
+                Log.e(TAG, "syncWifiCredential: exception during processing", e);
+                deliver(callbacks, new Status(CommonStatusCodes.INTERNAL_ERROR));
+            }
+        });
     }
+
+    @RequiresPermission(Manifest.permission.ACCESS_FINE_LOCATION)
     @Override
     public void syncWifiCredentialForNode(IWearableCallbacks callbacks, String nodeId) throws RemoteException {
-        Log.d(TAG, "unimplemented Method: syncWifiCredentialForNode");
+        postNetwork(callbacks, () -> {
+            WearableWifiService service = wearable.getWearWifiService();
+            if (service == null) {
+                Log.e(TAG, "syncConnectedWifiCredential: wifiService is null!");
+                deliver(callbacks, new Status(CommonStatusCodes.INTERNAL_ERROR));
+                return;
+            }
+            try {
+                service.syncConnectedCredentialToNode(nodeId, status -> deliver(callbacks, status));
+            } catch (RuntimeException e) {
+                Log.e(TAG, "syncConnectedWifiCredential: exception during processing", e);
+                deliver(callbacks, new Status(CommonStatusCodes.INTERNAL_ERROR));
+            }
+        });
     }
 
     /*

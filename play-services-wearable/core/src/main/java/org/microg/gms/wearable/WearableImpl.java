@@ -66,6 +66,7 @@ import org.microg.gms.wearable.channel.ChannelCallbacks;
 import org.microg.gms.wearable.channel.ChannelManager;
 import org.microg.gms.wearable.channel.ChannelToken;
 import org.microg.gms.wearable.channel.TrustedPeersService;
+import org.microg.gms.wearable.network.WearableWifiService;
 import org.microg.gms.wearable.proto.AppKey;
 import org.microg.gms.wearable.proto.AppKeys;
 import org.microg.gms.wearable.proto.Connect;
@@ -140,6 +141,8 @@ public class WearableImpl {
     private AssetFetcher assetFetcher;
     private NetworkConnectionManager networkManager;
 
+    private WearableWifiService wearWifiService;
+
     private RpcMessageTransport rpcTransport;
 
     private final Map<String, ConnectionRestrictions> nodeRestrictions = new ConcurrentHashMap<>();
@@ -200,6 +203,12 @@ public class WearableImpl {
 
         this.migrationController = new NodeMigrationController();
         this.assetFetcher = new AssetFetcher(nodeDatabase, networkHandler);
+
+        this.wearWifiService = new WearableWifiService(context, this);
+    }
+
+    public WearableWifiService getWearWifiService() {
+        return wearWifiService;
     }
 
     public AssetManager getAssetManager() {

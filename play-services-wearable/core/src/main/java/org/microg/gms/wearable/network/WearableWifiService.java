@@ -173,6 +173,11 @@ public class WearableWifiService {
         start();
     }
 
+    @Nullable
+    public WifiManager getWifiManager() {
+        return wifiManager;
+    }
+
     private void start() {
         if (!isWatch) {
             savedNetworkReceiver = new BroadcastReceiver() {
