@@ -20,6 +20,21 @@ import org.microg.safeparcel.AutoSafeParcelable;
 import org.microg.safeparcel.SafeParceled;
 
 public class GetEapIdResponse extends AutoSafeParcelable {
+	@SafeParceled(1)
+	private final int ver = 1;
+	@SafeParceled(2)
+	public int status;
+	@SafeParceled(3)
+	public String eapId;
+
+	private GetEapIdResponse() {}
+
+	public GetEapIdResponse(int status, String eapId) {
+		this.status = status;
+		this.eapId = eapId;
+	}
+
+
 
 	public static final Creator<GetEapIdResponse> CREATOR = new AutoCreator<GetEapIdResponse>(GetEapIdResponse.class);
 }

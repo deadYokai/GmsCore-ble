@@ -19,7 +19,20 @@ package com.google.android.gms.wearable.internal;
 import org.microg.safeparcel.AutoSafeParcelable;
 import org.microg.safeparcel.SafeParceled;
 
+import java.util.List;
+
 public class GetFastpairAccountKeysResponse extends AutoSafeParcelable {
+	@SafeParceled(1)
+	public int status;
+	@SafeParceled(2)
+	public List unk2;
+
+	private GetFastpairAccountKeysResponse(){}
+
+	public GetFastpairAccountKeysResponse(int status, List unk2) {
+		this.status = status;
+		this.unk2 = unk2;
+	}
 
 	public static final Creator<GetFastpairAccountKeysResponse> CREATOR = new AutoCreator<GetFastpairAccountKeysResponse>(GetFastpairAccountKeysResponse.class);
 }

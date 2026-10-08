@@ -20,6 +20,19 @@ import org.microg.safeparcel.AutoSafeParcelable;
 import org.microg.safeparcel.SafeParceled;
 
 public class PerformEapAkaResponse extends AutoSafeParcelable {
+	@SafeParceled(1)
+	private final int ver = 1;
+	@SafeParceled(2)
+	public int status;
+	@SafeParceled(3)
+	public String someStr;
+
+	private PerformEapAkaResponse() {}
+
+	public PerformEapAkaResponse(int status, String someStr) {
+		this.status = status;
+		this.someStr = someStr;
+	}
 
 	public static final Creator<PerformEapAkaResponse> CREATOR = new AutoCreator<PerformEapAkaResponse>(PerformEapAkaResponse.class);
 }
