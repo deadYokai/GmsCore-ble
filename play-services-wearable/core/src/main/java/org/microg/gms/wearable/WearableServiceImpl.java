@@ -569,21 +569,31 @@ public class WearableServiceImpl extends IWearableService.Stub {
         Log.d(TAG, "getFdForAsset " + asset);
         postMain(callbacks, () -> {
             // TODO: Access control
+            ParcelFileDescriptor pfd = null;
             try {
-                File file = wearable.createAssetFile(asset.getDigest());
-
-                if (!file.canExecute() || !file.isFile()) {
+                String digest = asset != null ? asset.getDigest() : null;
+                if (TextUtils.isEmpty(digest)) {
                     callbacks.onGetFdForAssetResponse(new GetFdForAssetResponse(4005, null));
                     return;
                 }
 
-                ParcelFileDescriptor pfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY);
-                callbacks.onGetFdForAssetResponse(new GetFdForAssetResponse(0, null));
+                File file = wearable.createAssetFile(digest);
+                if (!file.isFile() || !file.canRead()) {
+                    callbacks.onGetFdForAssetResponse(new GetFdForAssetResponse(4005, null));
+                    return;
+                }
+
+                pfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY);
+                callbacks.onGetFdForAssetResponse(new GetFdForAssetResponse(0, pfd));
             } catch (FileNotFoundException e) {
                 callbacks.onGetFdForAssetResponse(new GetFdForAssetResponse(4005, null));
             } catch (Exception e) {
                 Log.e(TAG, "getFdForAsset: exception during processing", e);
                 callbacks.onGetFdForAssetResponse(new GetFdForAssetResponse(8, null));
+            } finally {
+                if (pfd != null) {
+                    try { pfd.close(); } catch (IOException ignored) {}
+                }
             }
         });
     }
