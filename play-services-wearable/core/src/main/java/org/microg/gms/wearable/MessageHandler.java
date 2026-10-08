@@ -39,6 +39,7 @@ import com.google.android.gms.wearable.internal.MessageEventParcelable;
 import org.microg.gms.common.Utils;
 import org.microg.gms.profile.Build;
 import org.microg.gms.settings.SettingsContract;
+import org.microg.gms.wearable.channel.ChannelManager;
 import org.microg.gms.wearable.proto.AckAsset;
 import org.microg.gms.wearable.proto.ControlMessage;
 import org.microg.gms.wearable.proto.DataSyncTrackingMessage;
@@ -159,7 +160,7 @@ public class MessageHandler extends ServerMessageListener {
         }
 
         if (config.role == ROLE_SERVER
-                && (config.type == TYPE_BLUETOOTH_RFCOMM || config.type == TYPE_BLE))  {
+                && (config.type == TYPE_BLUETOOTH_RFCOMM || config.type == TYPE_BLE)) {
             String storedPeerId = wearable.getClockworkNodePreferences().getPeerNodeId();
             if (storedPeerId == null) {
                 Log.i(TAG, "onConnect: first pairing, storing peerNodeId=" + peerNodeId);
@@ -199,21 +200,21 @@ public class MessageHandler extends ServerMessageListener {
     @Override
     public void onSetAsset(SetAsset setAsset) {
         Log.d(TAG, "onSetAsset: " + setAsset);
-		if (setAsset.data == null && setAsset.digest != null) {
-			String fileName = WearableConnection.calculateDigest(
-					new RootMessage.Builder()
-							.setAsset(setAsset)
-							.hasAsset(true)
-							.build()
-							.encode());
-			File staleTemp = wearable.createAssetReceiveTempFile(fileName);
-			if (staleTemp.exists()) {
-				Log.d(TAG, "onSetAsset: discarding stale partial transfer for " + fileName);
-				if (!staleTemp.delete()) {
-					Log.w(TAG, "onSetAsset: failed to delete stale temp file " + staleTemp);
-				}
-			}
-		}
+        if (setAsset.data == null && setAsset.digest != null) {
+            String fileName = WearableConnection.calculateDigest(
+                    new RootMessage.Builder()
+                            .setAsset(setAsset)
+                            .hasAsset(true)
+                            .build()
+                            .encode());
+            File staleTemp = wearable.createAssetReceiveTempFile(fileName);
+            if (staleTemp.exists()) {
+                Log.d(TAG, "onSetAsset: discarding stale partial transfer for " + fileName);
+                if (!staleTemp.delete()) {
+                    Log.w(TAG, "onSetAsset: failed to delete stale temp file " + staleTemp);
+                }
+            }
+        }
         Asset asset;
         if (setAsset.data != null) {
             asset = Asset.createFromBytes(setAsset.data.toByteArray());
@@ -225,12 +226,60 @@ public class MessageHandler extends ServerMessageListener {
 
         wearable.addAssetToDatabase(asset, appKeys);
 
-        if (setAsset.digest != null) {
-            if (setAsset.data != null) {
-                wearable.getNodeDatabase().markAssetAsPresent(setAsset.digest);
+        if (setAsset.digest != null && setAsset.data != null) {
+            byte[] bytes = setAsset.data.toByteArray();
+            File target = wearable.createAssetFile(setAsset.digest);
+            if (!target.exists()) {
+                if (!calculateDigest(bytes).equals(setAsset.digest)) {
+                    Log.w(TAG, "onSetAsset: inline data digest mismatch for " + setAsset.digest);
+                    return;
+                }
+                File tmp = new File(target.getParent(), target.getName() + ".tmp");
+                try (FileOutputStream fos = new FileOutputStream(tmp)) {
+                    fos.write(bytes);
+                } catch (IOException e) {
+                    Log.w(TAG, "onSetAsset: failed to write inline asset", e);
+                    tmp.delete();
+                    return;
+                }
+                if (!tmp.renameTo(target)) {
+                    tmp.delete();
+                    return;
+                }
             }
-            wearable.getAssetFetcher().onAssetReceived(setAsset.digest);
+            onAssetAvailable(setAsset.digest);
         }
+    }
+
+    private void onAssetAvailable(String digest) {
+        List<DataItemRecord> nowReady = new ArrayList<>();
+        synchronized (wearable.getNodeDatabase()) {
+            wearable.getNodeDatabase().markAssetAsPresent(digest);
+            wearable.getAssetFetcher().onAssetReceived(digest);
+            Cursor cursor = wearable.getNodeDatabase().getDataItemsWaitingForAsset(digest);
+            if (cursor != null) {
+                try {
+                    while (cursor.moveToNext()) {
+                        DataItemRecord record = DataItemRecord.fromCursor(cursor);
+                        if (record.assetsAreReady) continue;
+                        boolean allPresent = true;
+                        for (Asset a : record.dataItem.getAssets().values()) {
+                            if (!wearable.assetFileExists(a.getDigest())) {
+                                allPresent = false;
+                                break;
+                            }
+                        }
+                        if (!allPresent) continue;
+                        record.assetsAreReady = true;
+                        wearable.getNodeDatabase().updateAssetsReady(record.dataItem.uri.toString(), true);
+                        nowReady.add(record);
+                    }
+                } finally {
+                    cursor.close();
+                }
+            }
+        }
+        for (DataItemRecord r : nowReady) wearable.dispatchDataChanged(r);
     }
 
     @Override
@@ -270,105 +319,130 @@ public class MessageHandler extends ServerMessageListener {
         Log.d(TAG, "onRpcRequest: " + rawRequest);
 
         if (rawRequest.request != null) {
-            if (wearable.getChannelManager() != null) {
-                wearable.getChannelManager().onChannelRequestReceived(getConnection(), peerNodeId, rawRequest);
+            ChannelManager channelManager = wearable.getChannelManager();
+            if (channelManager != null) {
+                channelManager.onChannelRequestReceived(getConnection(), peerNodeId, rawRequest);
             }
             return;
         }
 
         final RpcMessageTransport transport = wearable.getRpcTransport();
-        final Request rpcRequest = transport.normalizeInbound(peerNodeId, rawRequest);
+        final Request request = transport.normalizeInbound(peerNodeId, rawRequest);
 
-        if (Boolean.TRUE.equals(rpcRequest.requiresResponse)
-                && rpcRequest.requestId != null && peerNodeId != null
-                && rpcRequest.path != null && transport.isForLocalNode(rpcRequest)) {
+        final String path = request.path;
+        final String packageName = request.packageName;
+        final String sourceNodeId = TextUtils.isEmpty(request.sourceNodeId) ? peerNodeId : request.sourceNodeId;
 
-            final int reqGen = rpcRequest.generation != null ? rpcRequest.generation : 0;
+        if (!Boolean.TRUE.equals(request.requiresResponse) && request.senderRequestId != null && peerNodeId != null) {
+
+            byte[] responseData = request.rawData != null ? request.rawData.toByteArray() : null;
+
+            boolean consumed = wearable.getRpcHelper().deliverRpcResponse(peerNodeId, request.senderRequestId, responseData);
+
+            if (consumed) {
+                return;
+            }
+
+            Log.w(TAG, "onRpcRequest: unmatched response "
+                    + "senderRequestId=" + request.senderRequestId
+                    + " path=" + path + " peer=" + peerNodeId);
+        }
+
+        if (Boolean.TRUE.equals(request.requiresResponse)
+                && request.requestId != null
+                && peerNodeId != null && path != null && transport.isForLocalNode(request)) {
+
+            final int generation = request.generation != null ? request.generation : 0;
+
+            final int requestId = request.requestId;
+
             final WearableImpl.PendingRpcRequest pending = new WearableImpl.PendingRpcRequest(
-                    RpcHelper.combineId(reqGen, rpcRequest.requestId),
-                    reqGen,
-                    rpcRequest.path,
-                    peerNodeId,
-                    rpcRequest.packageName != null ? rpcRequest.packageName : "",
-                    rpcRequest.signatureDigest != null ? rpcRequest.signatureDigest : "",
-                    getConnection()
-            );
+                    RpcHelper.combineId(generation, requestId),
+                    generation, path, peerNodeId, packageName != null ? packageName : "",
+                    request.signatureDigest != null ? request.signatureDigest : "", getConnection());
 
-            if (!TextUtils.isEmpty(rpcRequest.packageName)
-                    && (TextUtils.isEmpty(rpcRequest.targetNodeId)
-                    || rpcRequest.targetNodeId.equals(wearable.getLocalNodeId()))) {
-                String src = TextUtils.isEmpty(rpcRequest.sourceNodeId)
-                        ? peerNodeId : rpcRequest.sourceNodeId;
-                MessageEventParcelable ev = new MessageEventParcelable(
+            if (!TextUtils.isEmpty(packageName) && !TextUtils.isEmpty(sourceNodeId)
+                    && (TextUtils.isEmpty(request.targetNodeId)
+                    || request.targetNodeId.equals(wearable.getLocalNodeId()))) {
+                final MessageEventParcelable event = new MessageEventParcelable(
                         pending.reqId,
-                        rpcRequest.path,
-                        rpcRequest.rawData != null ? rpcRequest.rawData.toByteArray() : null, src);
-                Intent reqIntent = new Intent("com.google.android.gms.wearable.REQUEST_RECEIVED");
-                reqIntent.setPackage(rpcRequest.packageName);
-                reqIntent.setData(new Uri.Builder().scheme("wear").authority(src).path(rpcRequest.path).build());
-                if (wearable.dispatchRpcRequest(reqIntent, ev, pending, () -> {
-                    Log.d(TAG, "onRpcRequest: declined by app, delivering as message: " + rpcRequest.path);
+                        path,
+                        request.rawData != null ? request.rawData.toByteArray() : null,
+                        sourceNodeId);
+
+                final Intent intent = new Intent("com.google.android.gms.wearable.REQUEST_RECEIVED");
+
+                intent.setPackage(packageName);
+                intent.setData(new Uri.Builder().scheme("wear").authority(sourceNodeId).path(path).build());
+
+                final boolean dispatched = wearable.dispatchRpcRequest(intent, event, pending, () -> {
+                    Log.d(TAG, "onRpcRequest: REQUEST_RECEIVED " + "listener declined path=" + path);
                     wearable.storePendingRpcRequest(pending);
-                    sendMessageReceived(rpcRequest.packageName, ev);
-                })) {
-                    Log.d(TAG, "onRpcRequest: dispatched onRequest to " + rpcRequest.packageName
-                            + " path=" + rpcRequest.path);
+                    sendMessageReceived(packageName, event);
+                });
+
+                if (dispatched) {
+                    Log.d(TAG, "onRpcRequest: dispatched REQUEST_RECEIVED "
+                            + "package=" + packageName + " path=" + path + " source=" + sourceNodeId);
                     return;
                 }
-                Log.d(TAG, "onRpcRequest: no REQUEST_RECEIVED service in " + rpcRequest.packageName
-                        + ", falling back");
+
+                Log.d(TAG, "onRpcRequest: no REQUEST_RECEIVED listener package=" + packageName
+                        + " path=" + path);
             }
+
             wearable.storePendingRpcRequest(pending);
 
-            final int pendingReqId = rpcRequest.requestId;
-            final String pendingPath = rpcRequest.path;
             final String pendingPeer = peerNodeId;
+            final String pendingPath = path;
 
             wearable.networkHandler.postDelayed(() -> {
-                WearableImpl.PendingRpcRequest still = wearable.consumePendingRpcRequest(pendingPeer, pendingPath);
-                if (still == null) return;
-                Log.d(TAG, "onRpcRequest: auto-ACK, no app response for path=" + pendingPath
-                        + " requestId=" + pendingReqId + " — sending empty ACK");
+                WearableImpl.PendingRpcRequest stillPending = wearable.consumePendingRpcRequest(pendingPeer, pendingPath);
+
+                if (stillPending == null) {
+                    return;
+                }
+
+                Log.d(TAG, "onRpcRequest: auto-ACK path=" + pendingPath + " requestId=" + requestId);
+
+                if (TextUtils.isEmpty(stillPending.packageName) || TextUtils.isEmpty(stillPending.signatureDigest)) {
+                    Log.w(TAG, "onRpcRequest: auto-ACK skipped; " + "request lacks package/signatureDigest");
+                    return;
+                }
+
                 try {
-                    if (TextUtils.isEmpty(still.packageName) || TextUtils.isEmpty(still.signatureDigest)) {
-                        Log.w(TAG, "onRpcRequest: auto-ACK skipped for " + pendingPath
-                                + ", request lacks package/signatureDigest");
-                        return;
-                    }
-                    still.connection.writeMessage(RpcMessageTransport.wrap(transport.buildRequest(
-                            still.packageName, still.signatureDigest, still.peerNodeId, still.path,
-                            null, null, false, still.reqId, null)));
+                    Request ack = transport.buildRequest(
+                            stillPending.packageName,
+                            stillPending.signatureDigest,
+                            stillPending.peerNodeId,
+                            stillPending.path,
+                            null, null, false,
+                            stillPending.reqId, null);
+
+                    stillPending.connection.writeMessage(RpcMessageTransport.wrap(ack));
+
                 } catch (IOException e) {
-                    Log.w(TAG, "onRpcRequest: auto-ACK, write failed for path=" + pendingPath, e);
+                    Log.w(TAG, "onRpcRequest: auto-ACK failed path=" + pendingPath, e);
                 }
             }, 500);
-        }
 
-        if (!Boolean.TRUE.equals(rpcRequest.requiresResponse)
-                && rpcRequest.senderRequestId != null && peerNodeId != null) {
-            byte[] responseData = rpcRequest.rawData != null
-                    ? rpcRequest.rawData.toByteArray() : null;
-            boolean consumed = wearable.getRpcHelper()
-                    .deliverRpcResponse(peerNodeId, rpcRequest.senderRequestId, responseData);
-            if (consumed) return;
-            Log.w(TAG, "onRpcRequest: unmatched response senderRequestId=" + rpcRequest.senderRequestId
-                    + " path=" + rpcRequest.path + " peer=" + peerNodeId);
+            return;
         }
 
 
-        if (TextUtils.isEmpty(rpcRequest.targetNodeId) || rpcRequest.targetNodeId.equals(wearable.getLocalNodeId())) {
-            int requestId = rpcRequest.requestId != null ? rpcRequest.requestId : 0;
-            String path = rpcRequest.path;
-            byte[] data = rpcRequest.rawData != null ? rpcRequest.rawData.toByteArray() : null;
-            String sourceNodeId = TextUtils.isEmpty(rpcRequest.sourceNodeId) ? peerNodeId : rpcRequest.sourceNodeId;
+        if (TextUtils.isEmpty(request.targetNodeId) || request.targetNodeId.equals(wearable.getLocalNodeId())) {
+            final int requestId = request.requestId != null ? request.requestId : 0;
+            final byte[] data = request.rawData != null ? request.rawData.toByteArray() : null;
+            final String source = TextUtils.isEmpty(request.sourceNodeId) ? peerNodeId : request.sourceNodeId;
+            final MessageEventParcelable event = new MessageEventParcelable(requestId, path, data, source);
 
-            MessageEventParcelable messageEvent = new MessageEventParcelable(requestId, path, data, sourceNodeId);
-
-            sendMessageReceived(rpcRequest.packageName, messageEvent);
-        } else if (rpcRequest.targetNodeId.equals(peerNodeId)) {
-            // Drop it
+            sendMessageReceived(packageName, event);
+        } else if (request.targetNodeId.equals(peerNodeId)) {
+            // Drop it.
+            Log.d(TAG, "onRpcRequest: dropping packet addressed to peer " + request.targetNodeId);
         } else {
-            // TODO: find next hop
+            Log.d(TAG, "onRpcRequest: packet requires routing target=" + request.targetNodeId
+                    + " peer=" + peerNodeId);
         }
     }
 
@@ -613,10 +687,8 @@ public class MessageHandler extends ServerMessageListener {
 
     public void handleFilePiece(WearableConnection connection, String fileName, byte[] bytes, String finalPieceDigest) {
         File file = wearable.createAssetReceiveTempFile(fileName);
-        try {
-            FileOutputStream fos = new FileOutputStream(file, true);
+        try (FileOutputStream fos = new FileOutputStream(file, true)) {
             fos.write(bytes);
-            fos.close();
         } catch (IOException e) {
             Log.w(TAG, "Error writing file piece", e);
         }
@@ -625,14 +697,17 @@ public class MessageHandler extends ServerMessageListener {
             return;
         }
 
-        // This is a final piece. If digest matches we're so happy!
         try {
-            String digest = calculateDigest(Utils.readStreamToEnd(new FileInputStream(file)));
+            String digest;
+            try (FileInputStream in = new FileInputStream(file)) {
+                digest = calculateDigest(Utils.readStreamToEnd(in));
+            }
 
             if (!digest.equals(finalPieceDigest)) {
                 Log.w(TAG, "Digest mismatch: expected=" + finalPieceDigest +
                         ", actual=" + digest + ". Deleting temp file.");
                 file.delete();
+                wearable.getAssetFetcher().onAssetFetchFailed(finalPieceDigest);
                 return;
             }
 
@@ -640,6 +715,7 @@ public class MessageHandler extends ServerMessageListener {
             if (!file.renameTo(targetFile)) {
                 Log.w(TAG, "Failed to rename temp file to target. Deleting temp file.");
                 file.delete();
+                wearable.getAssetFetcher().onAssetFetchFailed(finalPieceDigest);
                 return;
             }
 
@@ -653,46 +729,11 @@ public class MessageHandler extends ServerMessageListener {
                 Log.w(TAG, "Failed to send asset ACK", e);
             }
 
-            synchronized (wearable.getNodeDatabase()) {
-                wearable.getNodeDatabase().markAssetAsPresent(digest);
-                wearable.getAssetFetcher().onAssetReceived(digest);
-
-                Cursor cursor = wearable.getNodeDatabase().getDataItemsWaitingForAsset(digest);
-                if (cursor != null) {
-                    try {
-                        while (cursor.moveToNext()) {
-                            DataItemRecord record = DataItemRecord.fromCursor(cursor);
-
-                            boolean allPresent = true;
-                            for (Asset asset : record.dataItem.getAssets().values()) {
-                                if (!wearable.assetFileExists(asset.getDigest())) {
-                                    allPresent = false;
-                                    break;
-                                }
-                            }
-
-                            if (allPresent && !record.assetsAreReady) {
-                                Log.d(TAG, "All assets now ready for: " + record.dataItem.uri);
-
-                                record.assetsAreReady = true;
-                                wearable.getNodeDatabase().updateAssetsReady(
-                                        record.dataItem.uri.toString(), true);
-
-                                Intent intent = new Intent("com.google.android.gms.wearable.DATA_CHANGED");
-                                intent.setPackage(record.packageName);
-                                intent.setData(record.dataItem.uri);
-                                wearable.invokeListeners(intent,
-                                        listener -> listener.onDataChanged(record.toEventDataHolder()));
-                            }
-                        }
-                    } finally {
-                        cursor.close();
-                    }
-                }
-            }
+            onAssetAvailable(digest);
         } catch (IOException e) {
             Log.w(TAG, "Error processing final file piece", e);
             file.delete();
+            wearable.getAssetFetcher().onAssetFetchFailed(finalPieceDigest);
         }
     }
 

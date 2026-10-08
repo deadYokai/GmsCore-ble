@@ -1471,9 +1471,10 @@ public class WearableServiceImpl extends IWearableService.Stub {
             try {
                 List<NodeParcelable> nodes = new ArrayList<>();
                 Set<String> nodeIds = capabilities.getNodesForCapability(capability);
+                final Set<String> reachable = reachableNodeIds();
 
                 for (String nodeId : nodeIds) {
-                    if (shouldIncludeNode(nodeId, nodeFilter)) {
+                    if (shouldIncludeNode(nodeId, nodeFilter, reachable)) {
                         ConnectionConfiguration cc = wearable.getConfigurationByNodeId(nodeId);
                         if (cc == null) cc = wearable.getConfigurationByPeerNodeId(nodeId);
                         String dispName = (cc != null && cc.name != null) ? cc.name : nodeId;
@@ -1496,6 +1497,7 @@ public class WearableServiceImpl extends IWearableService.Stub {
         postMain(callbacks, () -> {
             try {
                 Map<String, CapabilityInfoParcelable> capabilitiesMap = new HashMap<>();
+                final Set<String> reachable = reachableNodeIds();
 
                 DataHolder dataHolder = wearable.getDataItemsByUriAsHolder(
                         Uri.parse("wear:/capabilities/"), packageName
@@ -1517,7 +1519,7 @@ public class WearableServiceImpl extends IWearableService.Stub {
                                     Set<String> nodeIds = capabilities.getNodesForCapability(capabilityName);
 
                                     for (String nodeId: nodeIds) {
-                                        if (shouldIncludeNode(nodeId, nodeFilter)){
+                                        if (shouldIncludeNode(nodeId, nodeFilter, reachable)){
                                             ConnectionConfiguration cc = wearable.getConfigurationByNodeId(nodeId);
                                             if (cc == null) cc = wearable.getConfigurationByPeerNodeId(nodeId);
                                             String dispName = (cc != null && cc.name != null) ? cc.name : nodeId;
@@ -1542,21 +1544,23 @@ public class WearableServiceImpl extends IWearableService.Stub {
         });
     }
 
-    private boolean shouldIncludeNode(String nodeId, int nodeFilter) {
+    private Set<String> reachableNodeIds() {
+        Set<String> ids = new HashSet<>();
+        String local = wearable.getLocalNodeId();
+        if (local != null) ids.add(local);
+        for (NodeParcelable n : wearable.getConnectedNodesParcelableList())
+            ids.add(n.getId());
+
+        return ids;
+    }
+
+    private boolean shouldIncludeNode(String nodeId, int nodeFilter, Set<String> reachable) {
         switch (nodeFilter) {
             case 0:
                 return true;
             case 1:
             case 2:
-                ConnectionConfiguration[] configs = wearable.getConfigurations();
-                if (configs != null) {
-                    for (ConnectionConfiguration config: configs) {
-                        if ((nodeId.equals(config.nodeId) || nodeId.equals(config.peerNodeId))
-                                && config.connected) {
-                            return true;
-                        }
-                    }
-                }
+                return reachable.contains(nodeId);
             default:
                 Log.w(TAG, "Unknown node filter: " + nodeFilter + ", including all nodes");
                 return true;

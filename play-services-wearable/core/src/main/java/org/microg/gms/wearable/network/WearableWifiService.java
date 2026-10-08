@@ -462,8 +462,18 @@ public class WearableWifiService {
         }
         wearable.getRpcHelper().addResponseListener(target, requestId,
                 CONNECT_REQUEST_TIMEOUT_MS + CONNECT_RESPONSE_GRACE_MS,
-                data -> callback.onStatus(new Status(statusFromResponse(data))),
-                () -> callback.onStatus(new Status(CommonStatusCodes.TIMEOUT)));
+                data -> {
+                    int status = statusFromResponse(data);
+                    if (status == STATUS_WIFI_CONNECT_FAILED || status == STATUS_WIFI_CONNECT_UNSUPPORTED) {
+                        Log.w(TAG, "Immediate connect failed (" + status + "); credentials still synced via data items");
+                        status = CommonStatusCodes.SUCCESS;
+                    }
+                    callback.onStatus(new Status(status));
+                },
+                () -> {
+                    Log.w(TAG, "Immediate connect timed out; relying on data item sync");
+                    callback.onStatus(new Status(CommonStatusCodes.SUCCESS));
+                });
     }
 
     private static int statusFromResponse(@Nullable byte[] data) {

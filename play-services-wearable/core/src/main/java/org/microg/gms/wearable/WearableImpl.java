@@ -328,6 +328,17 @@ public class WearableImpl {
         return record;
     }
 
+    public void dispatchDataChanged(DataItemRecord record) {
+        Intent intent = new Intent("com.google.android.gms.wearable.DATA_CHANGED");
+        intent.setPackage(record.packageName);
+        intent.setData(record.dataItem.uri);
+        if (migrationController.shouldDeliverEvents(record.packageName, record.source)) {
+            invokeListeners(intent, l -> l.onDataChanged(record.toEventDataHolder()));
+        } else {
+            Log.d(TAG, "Suppressing DATA_CHANGED for " + record.packageName + " from migrating node " + record.source);
+        }
+    }
+
     private void maybeDispatchCapabilityChanged(DataItemRecord record) {
         String path = record.dataItem.path;
         if (path == null || !path.startsWith("/capabilities/")) return;
@@ -977,6 +988,81 @@ public class WearableImpl {
         }
 
         return nodes;
+    }
+
+    public boolean invokeRequestListeners(Intent intent, MessageEventParcelable event, IRpcResponseCallback responseCallback) {
+        boolean matched = false;
+
+        for (String packageName : new ArrayList<>(listeners.keySet())) {
+            List<ListenerInfo> packageListeners = listeners.get(packageName);
+            if (packageListeners == null) {
+                continue;
+            }
+
+            for (int i = 0; i < packageListeners.size(); i++) {
+                ListenerInfo info = packageListeners.get(i);
+
+                boolean filterMatched = false;
+
+                if (intent != null) {
+                    for (IntentFilter filter : info.filters) {
+                        if (filter.match(
+                                context.getContentResolver(),
+                                intent,
+                                false,
+                                TAG) > 0) {
+
+                            filterMatched = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (!filterMatched && info.filters.length != 0) {
+                    continue;
+                }
+
+                matched = true;
+
+                try {
+                    info.listener.onRequest(event, responseCallback);
+                } catch (RemoteException e) {
+                    Log.w(TAG, "Registered REQUEST_RECEIVED listener at package "
+                                    + packageName + " failed, removing.");
+
+                    packageListeners.remove(i);
+                    i--;
+                }
+            }
+
+            if (packageListeners.isEmpty()) {
+                listeners.remove(packageName);
+            }
+        }
+
+        if (matched) {
+            return true;
+        }
+
+        if (intent != null) {
+            try {
+                IWearableListener remote = RemoteListenerProxy.get(
+                                context,
+                                intent,
+                                IWearableListener.class,
+                                "com.google.android.gms.wearable.BIND_LISTENER");
+
+                if (remote != null) {
+                    remote.onRequest(event, responseCallback);
+                    return true;
+                }
+
+            } catch (RemoteException e) {
+                Log.w(TAG, "Failed to deliver REQUEST_RECEIVED to " + intent, e);
+            }
+        }
+
+        return false;
     }
 
     public void invokeListeners(@Nullable Intent intent, ListenerInvoker invoker) {
@@ -1699,52 +1785,65 @@ public class WearableImpl {
         }
     }
 
-    public boolean dispatchRpcRequest(Intent intent, MessageEventParcelable event,
-                                      PendingRpcRequest pending, Runnable onDeclined) {
-        ResolveInfo info = context.getPackageManager().resolveService(intent, 0);
-        if (info == null || info.serviceInfo == null) return false;
+    public boolean dispatchRpcRequest(
+            Intent intent,
+            MessageEventParcelable event,
+            PendingRpcRequest pending,
+            Runnable onDeclined) {
 
-        Intent bind = new Intent("com.google.android.gms.wearable.BIND_LISTENER")
-                .setClassName(info.serviceInfo.packageName, info.serviceInfo.name);
-        final ServiceConnection[] holder = new ServiceConnection[1];
-        final boolean[] done = {false};
-        final Runnable unbind = () -> {
-            synchronized (done) {
-                if (done[0]) return;
-                done[0] = true;
-            }
-            try { context.unbindService(holder[0]); } catch (Exception ignored) {}
-        };
-        final IRpcResponseCallback callback = new IRpcResponseCallback.Stub() {
-            @Override
-            public void onResponse(boolean success, byte[] data) {
-                Log.d(TAG, "onRequest response: success=" + success + " path=" + pending.path
-                        + " bytes=" + (data != null ? data.length : 0));
-                if (success) sendRpcResponse(pending, data);
-                else if (onDeclined != null) networkHandler.post(onDeclined);
-                networkHandler.post(unbind);
-            }
-        };
-        holder[0] = new ServiceConnection() {
-            @Override
-            public void onServiceConnected(ComponentName name, IBinder service) {
-                try {
-                    IWearableListener.Stub.asInterface(service).onRequest(event, callback);
-                } catch (RemoteException e) {
-                    Log.w(TAG, "onRequest dispatch failed for " + name, e);
-                    networkHandler.post(unbind);
-                }
-            }
-            @Override public void onServiceDisconnected(ComponentName name) {}
-        };
-        if (!context.bindService(bind, holder[0], Context.BIND_AUTO_CREATE)) {
-            Log.w(TAG, "dispatchRpcRequest: could not bind " + bind);
-            return false;
+        final boolean[] completed = {false};
+        final Object lock = new Object();
+
+        final IRpcResponseCallback responseCallback =
+                new IRpcResponseCallback.Stub() {
+                    @Override
+                    public void onResponse(boolean success, byte[] data) {
+                        synchronized (lock) {
+                            if (completed[0]) {
+                                return;
+                            }
+                            completed[0] = true;
+                        }
+
+                        Log.d(
+                                TAG,
+                                "dispatchRpcRequest: response success="
+                                        + success
+                                        + " path=" + pending.path
+                                        + " bytes="
+                                        + (data != null ? data.length : 0)
+                        );
+
+                        if (success) {
+                            sendRpcResponse(pending, data);
+                        } else if (onDeclined != null) {
+                            networkHandler.post(onDeclined);
+                        }
+                    }
+                };
+
+        /*
+         * No resolveService().
+         * No bindService().
+         *
+         * The listener is already registered in `listeners`.
+         */
+        boolean delivered = invokeRequestListeners(
+                intent,
+                event,
+                responseCallback
+        );
+
+        if (!delivered) {
+            Log.d(
+                    TAG,
+                    "dispatchRpcRequest: no matching REQUEST_RECEIVED listener: "
+                            + intent
+            );
         }
-        networkHandler.postDelayed(unbind, 30_000);
-        return true;
-    }
 
+        return delivered;
+    }
 
     @RequiresPermission(Manifest.permission.BLUETOOTH_SCAN)
     public void stop() {
