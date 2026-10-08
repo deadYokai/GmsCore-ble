@@ -20,6 +20,10 @@ import org.microg.safeparcel.AutoSafeParcelable;
 import org.microg.safeparcel.SafeParceled;
 
 public class AppRecommendationsResponse extends AutoSafeParcelable {
+    @SafeParceled(1) public int statusCode;
+    // fields 2 (List<AppParcelable>) and 3 (WebIconParcelable) omitted until ported
 
-    public static final Creator<AppRecommendationsResponse> CREATOR = new AutoCreator<AppRecommendationsResponse>(AppRecommendationsResponse.class);
+    public AppRecommendationsResponse() {}
+    public AppRecommendationsResponse(int statusCode) { this.statusCode = statusCode; }
+    public static final Creator<AppRecommendationsResponse> CREATOR = new AutoCreator<>(AppRecommendationsResponse.class);
 }

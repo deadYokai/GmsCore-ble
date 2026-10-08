@@ -124,6 +124,7 @@ public class WearableServiceImpl extends IWearableService.Stub {
     private static final int FRAGMENT_COMPANION_TERMS_OF_SERVICE = 16;
     private static final long ENABLE_BACKUP_RPC_TIMEOUT_MS = 15_000L;
 
+    private static final String PREFS_APP_THEMES = "wearable_app_themes";
 
     private interface StatusSink {
         void onStatus(int statusCode);
@@ -1293,22 +1294,66 @@ public class WearableServiceImpl extends IWearableService.Stub {
     @Override
     public void getAppRecommendations(IWearableCallbacks callbacks, AppRecommendationsRequest request) throws RemoteException {
         Log.d(TAG, "getAppRecommendations: " + request);
-        // i think we don't need this
-        postMain(callbacks, () -> callbacks.onStatus(new Status(WEAR_FEATURE_DISABLED)));
+        postMain(callbacks, () -> callbacks.onAppRecommendationsResponse(
+                new AppRecommendationsResponse(CommonStatusCodes.CANCELED)));
     }
 
     @Override
     public void setThemeForApp(IWearableCallbacks callbacks, AppTheme theme) throws RemoteException {
         Log.d(TAG, "setThemeForApp: " + theme);
-        // TODO
-        postMain(callbacks, () -> callbacks.onStatus(new Status(WEAR_FEATURE_DISABLED)));
+        postNetwork(callbacks, () -> {
+            int status;
+            try {
+                if (theme == null) throw new IllegalArgumentException("theme is null");
+                int color = inRange(theme.colorTheme, 3);
+                int dynamic = inRange(theme.dynamicColor, 2);
+                int align = inRange(theme.screenAlignment, 2);
+                int size = inRange(theme.screenItemsSize, 3);
+                context.getSharedPreferences(PREFS_APP_THEMES, Context.MODE_PRIVATE).edit()
+                        .putString(this.packageName, color + "," + dynamic + "," + align + "," + size)
+                        .commit();
+                status = CommonStatusCodes.SUCCESS;
+            } catch (RuntimeException e) {
+                Log.w(TAG, "setThemeForApp failed", e);
+                status = CommonStatusCodes.INTERNAL_ERROR;
+            }
+            callbacks.onStatus(new Status(status));
+        });
     }
 
     @Override
-    public void getThemeForApp(IWearableCallbacks callbacks, String packageName) throws RemoteException {
-        Log.d(TAG, "getThemeForApp: " + packageName);
-        // TODO
-        postMain(callbacks, () -> callbacks.onStatus(new Status(WEAR_FEATURE_DISABLED)));
+    public void getThemeForApp(IWearableCallbacks callbacks, String targetPackage) throws RemoteException {
+        Log.d(TAG, "getThemeForApp: " + targetPackage);
+        postNetwork(callbacks, () -> {
+            int status;
+            AppTheme result = null;
+            try {
+                if (TextUtils.isEmpty(targetPackage)) throw new IllegalArgumentException("empty package");
+                result = loadAppTheme(targetPackage);
+                status = CommonStatusCodes.SUCCESS;
+            } catch (RuntimeException e) {
+                Log.w(TAG, "getThemeForApp failed", e);
+                status = CommonStatusCodes.INTERNAL_ERROR;
+            }
+            callbacks.onGetAppThemeResponse(new GetAppThemeResponse(status, result));
+        });
+    }
+
+    private static int inRange(int v, int max) { return (v < 0 || v > max) ? 0 : v; }
+
+    private AppTheme loadAppTheme(String pkg) {
+        int[] v = new int[4];
+        String raw = context.getSharedPreferences(PREFS_APP_THEMES, Context.MODE_PRIVATE).getString(pkg, null);
+        if (raw != null) {
+            String[] p = raw.split(",");
+            try {
+                if (p.length == 4) for (int i = 0; i < 4; i++) v[i] = Integer.parseInt(p[i]);
+            } catch (NumberFormatException e) {
+                v = new int[4];
+            }
+        }
+        // defaults from gms: SYSTEM, dynamic color enabled, START alignment, LARGE items
+        return new AppTheme(v[0] == 0 ? 1 : v[0], v[1] == 0 ? 1 : v[1], v[2] == 0 ? 1 : v[2], v[3] == 0 ? 3 : v[3]);
     }
 
     @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
@@ -1447,9 +1492,6 @@ public class WearableServiceImpl extends IWearableService.Stub {
 
     @Override
     public void getAllCapabilities(IWearableCallbacks callbacks, int nodeFilter) throws RemoteException {
-//        Log.d(TAG, "unimplemented Method: getConnectedCapaibilties: " + nodeFilter);
-//        callbacks.onGetAllCapabilitiesResponse(new GetAllCapabilitiesResponse());
-
         Log.d(TAG, "getAllCapabilities: nodeFilter=" + nodeFilter);
         postMain(callbacks, () -> {
             try {
@@ -1523,7 +1565,6 @@ public class WearableServiceImpl extends IWearableService.Stub {
 
     @Override
     public void addLocalCapability(IWearableCallbacks callbacks, String capability) throws RemoteException {
-//        Log.d(TAG, "unimplemented Method: addLocalCapability: " + capability);
         Log.d(TAG, "addLocalCapability: " + capability);
 
         this.wearable.networkHandler.post(new CallbackRunnable(callbacks) {
@@ -1548,7 +1589,6 @@ public class WearableServiceImpl extends IWearableService.Stub {
 
     @Override
     public void removeLocalCapability(IWearableCallbacks callbacks, String capability) throws RemoteException {
-//        Log.d(TAG, "unimplemented Method: removeLocalCapability: " + capability);
         Log.d(TAG, "removeLocalCapability: " + capability);
 
         this.wearable.networkHandler.post(new CallbackRunnable(callbacks) {

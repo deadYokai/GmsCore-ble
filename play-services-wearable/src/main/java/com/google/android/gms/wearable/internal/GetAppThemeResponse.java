@@ -16,10 +16,19 @@
 
 package com.google.android.gms.wearable.internal;
 
+import com.google.android.gms.wearable.AppTheme;
+
 import org.microg.safeparcel.AutoSafeParcelable;
 import org.microg.safeparcel.SafeParceled;
 
 public class GetAppThemeResponse extends AutoSafeParcelable {
+    @SafeParceled(2) public int statusCode;
+    @SafeParceled(3) public AppTheme theme;
 
-    public static final Creator<GetAppThemeResponse> CREATOR = new AutoCreator<GetAppThemeResponse>(GetAppThemeResponse.class);
+    public GetAppThemeResponse() {}
+    public GetAppThemeResponse(int statusCode, AppTheme theme) {
+        this.statusCode = statusCode;
+        this.theme = theme;
+    }
+    public static final Creator<GetAppThemeResponse> CREATOR = new AutoCreator<>(GetAppThemeResponse.class);
 }
